@@ -19,6 +19,7 @@ func bindBackupApi(app core.App, rg *router.RouterGroup[*core.RequestEvent]) {
 	sub.GET("", backupsList).Bind(RequireSuperuserAuth())
 	sub.POST("", backupCreate).Bind(RequireSuperuserAuth())
 	sub.POST("/upload", backupUpload).Bind(BodyLimit(0), RequireSuperuserAuth())
+	sub.POST("/verify", backupVerify).Bind(RequireSuperuserAuth())
 	sub.GET("/{key}", backupDownload) // relies on superuser file token
 	sub.DELETE("/{key}", backupDelete).Bind(RequireSuperuserAuth())
 	sub.POST("/{key}/restore", backupRestore).Bind(RequireSuperuserAuth())
@@ -28,6 +29,12 @@ type backupFileInfo struct {
 	Modified types.DateTime `json:"modified"`
 	Key      string         `json:"key"`
 	Size     int64          `json:"size"`
+
+	// VerificationStatus is the last known integrity verification status
+	// ("valid", "invalid" or empty if the backup hasn't been verified yet).
+	VerificationStatus string         `json:"verificationStatus"`
+	VerificationError  string         `json:"verificationError,omitempty"`
+	VerifiedAt         types.DateTime `json:"verifiedAt"`
 }
 
 func backupsList(e *core.RequestEvent) error {
@@ -47,19 +54,62 @@ func backupsList(e *core.RequestEvent) error {
 		return e.BadRequestError("Failed to retrieve backup items. Raw error: \n"+err.Error(), nil)
 	}
 
-	result := make([]backupFileInfo, len(backups))
+	// load the persisted verification results (best effort - the listing
+	// should work even if the manifest is missing or unreadable)
+	verificationByKey := map[string]core.BackupVerificationEntry{}
+	if entries, err := e.App.FindBackupVerificationEntries(); err == nil {
+		for _, entry := range entries {
+			verificationByKey[entry.Key] = entry
+		}
+	}
 
-	for i, obj := range backups {
+	result := make([]backupFileInfo, 0, len(backups))
+
+	for _, obj := range backups {
+		// hide the internal verification manifest and other reserved keys
+		if core.IsReservedBackupKey(obj.Key) {
+			continue
+		}
+
 		modified, _ := types.ParseDateTime(obj.ModTime)
 
-		result[i] = backupFileInfo{
+		info := backupFileInfo{
 			Key:      obj.Key,
 			Size:     obj.Size,
 			Modified: modified,
 		}
+
+		if verification, ok := verificationByKey[obj.Key]; ok {
+			info.VerificationStatus = string(verification.Status)
+			info.VerificationError = verification.Error
+			info.VerifiedAt = verification.CheckedAt
+		}
+
+		result = append(result, info)
 	}
 
 	return e.JSON(http.StatusOK, result)
+}
+
+func backupVerify(e *core.RequestEvent) error {
+	if e.App.Store().Has(core.StoreKeyActiveBackup) {
+		return e.BadRequestError("Try again later - another backup/restore process has already been started.", nil)
+	}
+
+	if e.App.Store().Has(core.StoreKeyActiveBackupVerification) {
+		return e.BadRequestError("Try again later - a backup verification process has already been started.", nil)
+	}
+
+	// allow up to 30 minutes for large backups sets
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	report, err := e.App.ReconcileBackups(ctx)
+	if err != nil {
+		return e.BadRequestError("Failed to complete backups verification. Raw error: \n"+err.Error(), nil)
+	}
+
+	return e.JSON(http.StatusOK, report)
 }
 
 func backupDownload(e *core.RequestEvent) error {

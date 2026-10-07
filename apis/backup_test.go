@@ -829,6 +829,152 @@ func TestBackupsRestore(t *testing.T) {
 	}
 }
 
+func TestBackupsVerify(t *testing.T) {
+	t.Parallel()
+
+	superuserToken := "eyJhbGciOiJIUzI1NiJ9.eyJpZCI6InN5d2JoZWNuaDQ2cmhtMCIsInR5cGUiOiJhdXRoIiwiY29sbGVjdGlvbklkIjoicGJjXzMxNDI2MzU4MjMiLCJleHAiOjI1MjQ2MDQ0NjEsInJlZnJlc2hhYmxlIjp0cnVlfQ.UXgO3j-0BumcugrFjbd7j0M4MQvbrLggLlcu_YNGjoY"
+	regularUserToken := "eyJhbGciOiJIUzI1NiJ9.eyJpZCI6IjRxMXhsY2xtZmxva3UzMyIsInR5cGUiOiJhdXRoIiwiY29sbGVjdGlvbklkIjoiX3BiX3VzZXJzX2F1dGhfIiwiZXhwIjoyNTI0NjA0NDYxLCJyZWZyZXNoYWJsZSI6dHJ1ZX0.ZT3F0Z3iM-xbGgSG3LEKiEzHrPHr8t8IuHLZGGNuxLo"
+
+	scenarios := []tests.ApiScenario{
+		{
+			Name:            "unauthorized",
+			Method:          http.MethodPost,
+			URL:             "/api/backups/verify",
+			ExpectedStatus:  401,
+			ExpectedContent: []string{`"data":{}`},
+			ExpectedEvents:  map[string]int{"*": 0},
+		},
+		{
+			Name:   "authorized as regular user",
+			Method: http.MethodPost,
+			URL:    "/api/backups/verify",
+			Headers: map[string]string{
+				"Authorization": regularUserToken,
+			},
+			ExpectedStatus:  403,
+			ExpectedContent: []string{`"data":{}`},
+			ExpectedEvents:  map[string]int{"*": 0},
+		},
+		{
+			Name:   "authorized as superuser (pending verification)",
+			Method: http.MethodPost,
+			URL:    "/api/backups/verify",
+			Headers: map[string]string{
+				"Authorization": superuserToken,
+			},
+			BeforeTestFunc: func(t testing.TB, app *tests.TestApp, e *core.ServeEvent) {
+				app.Store().Set(core.StoreKeyActiveBackupVerification, struct{}{})
+			},
+			ExpectedStatus:  400,
+			ExpectedContent: []string{`"data":{}`},
+			ExpectedEvents:  map[string]int{"*": 0},
+		},
+		{
+			Name:   "authorized as superuser (valid backups)",
+			Method: http.MethodPost,
+			URL:    "/api/backups/verify",
+			Headers: map[string]string{
+				"Authorization": superuserToken,
+			},
+			BeforeTestFunc: func(t testing.TB, app *tests.TestApp, e *core.ServeEvent) {
+				if err := createTestBackups(app); err != nil {
+					t.Fatal(err)
+				}
+			},
+			ExpectedStatus: 200,
+			ExpectedContent: []string{
+				`"test1.zip"`,
+				`"status":"valid"`,
+			},
+			NotExpectedContent: []string{
+				`"status":"invalid"`,
+				core.BackupVerificationManifestKey,
+			},
+			ExpectedEvents: map[string]int{"*": 0},
+		},
+		{
+			Name:   "authorized as superuser (corrupt backup is reported and preserved)",
+			Method: http.MethodPost,
+			URL:    "/api/backups/verify",
+			Headers: map[string]string{
+				"Authorization": superuserToken,
+			},
+			BeforeTestFunc: func(t testing.TB, app *tests.TestApp, e *core.ServeEvent) {
+				if err := createTestBackups(app); err != nil {
+					t.Fatal(err)
+				}
+
+				fsys, err := app.NewBackupsFilesystem()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer fsys.Close()
+
+				if err := fsys.Upload([]byte("not a zip"), "broken.zip"); err != nil {
+					t.Fatal(err)
+				}
+			},
+			AfterTestFunc: func(t testing.TB, app *tests.TestApp, res *http.Response) {
+				// the corrupt backup must not be auto-cleaned
+				fsys, err := app.NewBackupsFilesystem()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer fsys.Close()
+
+				if exists, _ := fsys.Exists("broken.zip"); !exists {
+					t.Fatal("Expected the corrupt backup to be preserved")
+				}
+			},
+			ExpectedStatus: 200,
+			ExpectedContent: []string{
+				`"broken.zip"`,
+				`"status":"invalid"`,
+			},
+			ExpectedEvents: map[string]int{"*": 0},
+		},
+	}
+
+	for _, scenario := range scenarios {
+		scenario.Test(t)
+	}
+}
+
+func TestBackupsListVerificationStatus(t *testing.T) {
+	t.Parallel()
+
+	superuserToken := "eyJhbGciOiJIUzI1NiJ9.eyJpZCI6InN5d2JoZWNuaDQ2cmhtMCIsInR5cGUiOiJhdXRoIiwiY29sbGVjdGlvbklkIjoicGJjXzMxNDI2MzU4MjMiLCJleHAiOjI1MjQ2MDQ0NjEsInJlZnJlc2hhYmxlIjp0cnVlfQ.UXgO3j-0BumcugrFjbd7j0M4MQvbrLggLlcu_YNGjoY"
+
+	scenario := tests.ApiScenario{
+		Name:   "list includes verification status and hides the manifest",
+		Method: http.MethodGet,
+		URL:    "/api/backups",
+		Headers: map[string]string{
+			"Authorization": superuserToken,
+		},
+		BeforeTestFunc: func(t testing.TB, app *tests.TestApp, e *core.ServeEvent) {
+			if err := createTestBackups(app); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := app.ReconcileBackups(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		},
+		ExpectedStatus: 200,
+		ExpectedContent: []string{
+			`"test1.zip"`,
+			`"verificationStatus":"valid"`,
+		},
+		NotExpectedContent: []string{
+			core.BackupVerificationManifestKey,
+		},
+		ExpectedEvents: map[string]int{"*": 0},
+	}
+
+	scenario.Test(t)
+}
+
 // -------------------------------------------------------------------
 
 func createTestBackups(app core.App) error {

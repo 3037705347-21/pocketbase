@@ -132,6 +132,19 @@ type App interface {
 	// NB! This feature is experimental and currently is expected to work only on UNIX based systems.
 	RestoreBackup(ctx context.Context, name string) error
 
+	// ReconcileBackups verifies the integrity of all candidate backup files
+	// and persists the verification results so that unchanged backups are
+	// not re-verified on subsequent runs.
+	//
+	// Corrupt or unverifiable backups are reported in the result but are
+	// never deleted automatically; only the verified backups count toward
+	// the automated backups retention quota.
+	ReconcileBackups(ctx context.Context) (*BackupVerificationReport, error)
+
+	// FindBackupVerificationEntries returns the persisted backup
+	// verification entries from the last reconciliation.
+	FindBackupVerificationEntries() ([]BackupVerificationEntry, error)
+
 	// Restart restarts (aka. replaces) the current running application process.
 	//
 	// NB! It relies on execve which is supported only on UNIX based systems.
