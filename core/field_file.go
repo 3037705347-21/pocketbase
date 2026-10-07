@@ -390,6 +390,23 @@ func (f *FileField) Intercept(
 
 		return actionFunc()
 	case InterceptorActionAfterCreate, InterceptorActionAfterUpdate:
+		// register ownership records for the newly uploaded files
+		// that are still part of the committed record value
+		uploaded, _ := record.GetRaw(uploadedFilesPrefix + f.Name).([]*filesystem.File)
+		if len(uploaded) > 0 {
+			currentValues := f.extractPlainStrings(f.toSliceValue(record.GetRaw(f.Name)))
+			currentValues = list.ToUniqueStringSlice(currentValues)
+
+			uploadedNames := make([]string, 0, len(uploaded))
+			for _, uf := range uploaded {
+				if uf != nil && list.ExistInSlice(uf.Name, currentValues) {
+					uploadedNames = append(uploadedNames, uf.Name)
+				}
+			}
+
+			f.registerFilesOwnership(newContextIfInvalid(ctx), app, record, uploadedNames)
+		}
+
 		record.SetRaw(uploadedFilesPrefix+f.Name, nil)
 
 		err := f.processFilesToDelete(ctx, app, record)
@@ -591,6 +608,7 @@ func (f *FileField) deleteFilesByNamesList(ctx context.Context, app App, record 
 	fsys.SetContext(ctx)
 
 	var failures []error
+	var deletedKeys []string
 
 	for i := len(filenames) - 1; i >= 0; i-- {
 		filename := filenames[i]
@@ -613,8 +631,13 @@ func (f *FileField) deleteFilesByNamesList(ctx context.Context, app App, record 
 			if len(thumbsErr) > 0 {
 				app.Logger().Warn("Failed to delete file thumbs", "error", errors.Join(thumbsErr...))
 			}
+
+			deletedKeys = append(deletedKeys, path)
 		}
 	}
+
+	// unregister the ownership records of the successfully deleted files
+	f.unregisterFilesOwnership(app, deletedKeys)
 
 	if len(failures) > 0 {
 		return filenames, fmt.Errorf("failed to delete all files: %w", errors.Join(failures...))

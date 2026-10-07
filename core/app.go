@@ -284,6 +284,22 @@ type App interface {
 	// FindRecordByViewFile returns the original Record of the provided view collection file.
 	FindRecordByViewFile(viewCollectionModelOrIdentifier any, fileFieldName string, filename string) (*Record, error)
 
+	// ReconcileFiles reconciles the storage files using the record file references
+	// as source of truth.
+	//
+	// It persists ownership records for all managed files (with content digest
+	// and derived thumbs), adopts referenced files that are missing an ownership
+	// record, deletes (unless disabled) managed files that are confirmed to have
+	// no reference (together with their thumbs), and reports referenced files
+	// that are missing or whose content has been modified.
+	//
+	// Storage files without an ownership record and without a record reference
+	// are treated as externally managed and are never deleted.
+	//
+	// The operation is idempotent and resumable, and it aborts without any
+	// delete/write if the storage or the ownership records cannot be read.
+	ReconcileFiles(ctx context.Context, options ...*FileReconcileOptions) (*FileReconcileReport, error)
+
 	// Vacuum executes VACUUM on the data.db in order to reclaim unused data db disk space.
 	Vacuum() error
 
