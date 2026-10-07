@@ -472,6 +472,23 @@ type App interface {
 	// cascade and file delete actions.
 	TruncateCollection(collection *Collection) error
 
+	// ReconcileRelationIntegrity verifies the relation fields referencing
+	// the provided target collection and repairs the references to
+	// missing/deleted records.
+	//
+	// The conclusions are persisted in a dedicated ledger before being
+	// applied atomically in a single transaction and the operation is
+	// idempotent and convergent on rerun (including after a crash).
+	//
+	// View collections cannot be reconciled.
+	ReconcileRelationIntegrity(targetCollection *Collection) (*RelationIntegrityReport, error)
+
+	// FindRelationIntegrityIssues returns the persisted relation integrity
+	// reconciliation conclusions associated with the specified target collection.
+	//
+	// Optionally filter by status ("staged" and/or "resolved").
+	FindRelationIntegrityIssues(targetCollectionId string, statuses ...string) ([]*RelationIntegrityIssue, error)
+
 	// ImportCollections imports the provided collections data in a single transaction.
 	//
 	// For existing matching collections, the imported data is unmarshaled on top of the existing model.
