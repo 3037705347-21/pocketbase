@@ -5,13 +5,16 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/plugins/migratecmd"
 	"github.com/pocketbase/pocketbase/tests"
 	"github.com/pocketbase/pocketbase/tools/list"
 	"github.com/pocketbase/pocketbase/tools/types"
+	"github.com/spf13/cobra"
 )
 
 func TestAutomigrateCollectionCreate(t *testing.T) {
@@ -1365,5 +1368,84 @@ func TestAutomigrateCollectionNoChanges(t *testing.T) {
 				t.Fatalf("Expected 0 files to be generated, got %d", total)
 			}
 		})
+	}
+}
+
+var registerReconcileTestMigrationOnce sync.Once
+
+func TestMigrateHistorySyncReconcilesRenamedFile(t *testing.T) {
+	t.Parallel()
+
+	app, _ := tests.NewTestApp()
+	defer app.Cleanup()
+	if err := app.Bootstrap(); err != nil {
+		t.Fatalf("Failed to bootstrap the test app: %v", err)
+	}
+
+	migrationsDir := filepath.Join(app.DataDir(), "_test_reconcile_migrations")
+	if err := os.MkdirAll(migrationsDir, os.ModePerm); err != nil {
+		t.Fatal(err)
+	}
+
+	newFile := "1000000000_reconcile_renamed.go"
+	content := []byte("package _test_migrations\n\n// identity reconciliation test source\n")
+	if err := os.WriteFile(filepath.Join(migrationsDir, newFile), content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	identity := core.MigrationIdentity(content)
+
+	// register the migration under its new (renamed) file name,
+	// simulating a Go migration renamed between branches
+	// (sync.Once because AppMigrations is a package-level shared list)
+	registerReconcileTestMigrationOnce.Do(func() {
+		core.AppMigrations.Register(nil, nil, newFile)
+	})
+
+	rootCmd := &cobra.Command{Use: "test"}
+	migratecmd.MustRegister(app, rootCmd, migratecmd.Config{
+		TemplateLang: migratecmd.TemplateLangGo,
+		Dir:          migrationsDir,
+	})
+
+	// seed a single stale entry applied under the old file name
+	if _, err := app.DB().NewQuery("DELETE FROM " + core.DefaultMigrationsTable).Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.DB().Insert(core.DefaultMigrationsTable, dbx.Params{
+		"file":     "1000000000_reconcile_old_name.go",
+		"applied":  123,
+		"identity": identity,
+	}).Execute(); err != nil {
+		t.Fatal(err)
+	}
+
+	rootCmd.SetArgs([]string{"migrate", "history-sync"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Expected history-sync to succeed, got: %v", err)
+	}
+
+	rows := []struct {
+		File     string `db:"file"`
+		Applied  int64  `db:"applied"`
+		Identity string `db:"identity"`
+	}{}
+	if err := app.DB().Select("file", "applied", "identity").
+		From(core.DefaultMigrationsTable).
+		All(&rows); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(rows) != 1 {
+		t.Fatalf("Expected exactly 1 history row after reconciliation, got %d: %+v", len(rows), rows)
+	}
+	if rows[0].File != newFile {
+		t.Fatalf("Expected the history entry to be renamed to %q, got %q", newFile, rows[0].File)
+	}
+	if rows[0].Identity != identity {
+		t.Fatalf("Expected identity %q, got %q", identity, rows[0].Identity)
+	}
+	if rows[0].Applied != 123 {
+		t.Fatalf("Expected the applied time to be preserved (123), got %d", rows[0].Applied)
 	}
 }

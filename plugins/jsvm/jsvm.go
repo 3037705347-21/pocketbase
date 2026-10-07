@@ -217,8 +217,15 @@ func (p *plugin) registerMigrations() error {
 		vm.Set("$template", templateRegistry)
 		vm.Set("__hooks", absHooksDir)
 
+		identity := core.MigrationIdentity(content)
+
 		vm.Set("migrate", func(up, down func(txApp core.App) error) {
-			core.AppMigrations.Register(up, down, file)
+			core.AppMigrations.Add(&core.Migration{
+				Up:       up,
+				Down:     down,
+				File:     file,
+				Identity: identity,
+			})
 		})
 
 		if p.config.OnInit != nil {

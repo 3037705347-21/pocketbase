@@ -18,9 +18,11 @@ package migratecmd
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/pocketbase/pocketbase/core"
@@ -99,7 +101,8 @@ func (p *plugin) createCommand() *cobra.Command {
 - down [number] - reverts the last [number] applied migrations
 - create name   - creates new blank migration template file
 - collections   - creates new migration file with snapshot of the local collections configuration
-- history-sync  - ensures that the _migrations history table doesn't have references to deleted migration files
+- history-sync  - reconciles the _migrations history table with the current migration files
+                  based on their content identity (renamed, content-changed and missing files)
 `
 
 	command := &cobra.Command{
@@ -129,7 +132,13 @@ func (p *plugin) createCommand() *cobra.Command {
 				list.Copy(core.SystemMigrations)
 				list.Copy(core.AppMigrations)
 
-				runner := core.NewMigrationsRunner(p.app, list)
+				// attach the on-disk migration files content identity so that
+				// renamed/content-edited migrations can be reconciled with the history
+				if err := p.attachFileIdentities(&list); err != nil {
+					return err
+				}
+
+				runner := core.NewMigrationsRunner(p.app, list).WithHistoryReconciliation()
 
 				if err := runner.Run(args...); err != nil {
 					return err
@@ -141,6 +150,55 @@ func (p *plugin) createCommand() *cobra.Command {
 	}
 
 	return command
+}
+
+// attachFileIdentities computes a stable content identity from the on-disk
+// migration files and assigns it to the matching migrations in the list
+// (migrations that already have an identity, eg. loaded by the JS VM, are skipped).
+func (p *plugin) attachFileIdentities(list *core.MigrationsList) error {
+	entries, err := os.ReadDir(p.config.Dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // no migrations directory
+		}
+		return err
+	}
+
+	identities := map[string]string{}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !p.isMigrationSourceFile(name) {
+			continue
+		}
+
+		content, err := os.ReadFile(filepath.Join(p.config.Dir, name))
+		if err != nil {
+			return err
+		}
+
+		identities[name] = core.MigrationIdentity(content)
+	}
+
+	for _, m := range list.Items() {
+		if m.Identity != "" {
+			continue
+		}
+		if identity, ok := identities[m.File]; ok {
+			m.Identity = identity
+		}
+	}
+
+	return nil
+}
+
+func (p *plugin) isMigrationSourceFile(name string) bool {
+	switch p.config.TemplateLang {
+	case TemplateLangJS:
+		return strings.HasSuffix(name, ".js") || strings.HasSuffix(name, ".ts")
+	default:
+		return strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, "_test.go")
+	}
 }
 
 func (p *plugin) migrateCreateHandler(template string, args []string, interactive bool) (string, error) {

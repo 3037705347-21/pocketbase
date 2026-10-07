@@ -76,7 +76,8 @@ func (p *plugin) automigrateOnCollectionChange(e *core.CollectionRequestEvent) e
 			"file": name,
 			// use microseconds for more granular applied time in case
 			// multiple collection changes happens at the ~exact time
-			"applied": time.Now().UnixMicro(),
+			"applied":  time.Now().UnixMicro(),
+			"identity": core.MigrationIdentity([]byte(template)),
 		}).Execute()
 		if err != nil {
 			return err
