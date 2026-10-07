@@ -493,6 +493,20 @@ type App interface {
 	// This method is automatically invoked as part of a collection create/update/delete operation.
 	SyncRecordTableSchema(newCollection *Collection, oldCollection *Collection) error
 
+	// ReconcileRecordTable compares the physical record table of the specified
+	// non-view collection with its definition and converges it to the expected
+	// schema (adds missing columns, removes extra columns after archiving their
+	// values, repairs column definitions and indexes).
+	//
+	// It is idempotent and safe to rerun after an interrupted execution.
+	ReconcileRecordTable(collection *Collection) (*ReconcileCollectionReport, error)
+
+	// ReconcileRecordTables reconciles all non-view collection record tables,
+	// or only the explicitly provided ones.
+	//
+	// Tables that don't belong to a collection are never touched.
+	ReconcileRecordTables(optCollections ...*Collection) (*ReconcileReport, error)
+
 	// ---------------------------------------------------------------
 
 	// FindAllExternalAuthsByRecord returns all ExternalAuth models
